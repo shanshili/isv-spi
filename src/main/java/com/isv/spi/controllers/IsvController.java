@@ -1,5 +1,6 @@
 package com.isv.spi.controllers;
 
+import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.isv.spi.models.UserInfo;
 import com.isv.spi.services.StorageService;
@@ -219,7 +220,7 @@ public class IsvController {
             logger.error("删除实例状态文件失败: {}", e.getMessage(), e);
         }
     }
- /**
+    /**
      * 新增：检查实例是否过期的接口
      * POST /isv/check
      * Content-Type: application/x-www-form-urlencoded 或 application/json
@@ -235,14 +236,12 @@ public class IsvController {
         // 获取参数（支持表单和JSON格式）
         String aliUid = request.getParameter("aliuid");
         String computeNestInstanceId = request.getParameter("instanceid");
-        String apiKey = request.getParameter("apikey");
         
         // 如果没有表单参数，尝试从请求体读取JSON
         if ((aliUid == null || computeNestInstanceId == null) && 
             request.getContentType() != null && 
             request.getContentType().contains("application/json")) {
             try {
-                // 简单解析JSON请求体
                 StringBuilder requestBody = new StringBuilder();
                 String line;
                 while ((line = request.getReader().readLine()) != null) {
@@ -253,56 +252,69 @@ public class IsvController {
                     JSONObject json = JSONObject.parseObject(requestBody.toString());
                     if (aliUid == null) aliUid = json.getString("aliuid");
                     if (computeNestInstanceId == null) computeNestInstanceId = json.getString("instanceid");
-                    if (apiKey == null) apiKey = json.getString("apikey");
                 }
             } catch (Exception e) {
-                System.err.println("解析JSON请求体失败: " + e.getMessage());
+                logger.error("解析JSON请求体失败: {}", e.getMessage());
             }
         }
         
         // 参数校验
         if (aliUid == null || aliUid.trim().isEmpty()) {
-            System.err.println("缺少参数: aliuid");
-            return "false";
-        }
-
-        if (computeNestInstanceId == null || computeNestInstanceId.trim().isEmpty()) {
-            System.err.println("缺少参数: instanceid");
-            return "false";
-        }
-        
-        // 根据aliUid获取用户信息
-        List<UserInfo> userInfoList = storageService.getUsersByAliUid(aliUid);
-        
-        // 检查是否存在用户信息
-        if (userInfoList == null || userInfoList.isEmpty()) {
-            System.out.println("未找到用户信息: " + aliUid);
+            logger.error("缺少参数: aliuid");
             createInstanceStatusFile(computeNestInstanceId, false);
             return "false";
         }
 
-        // 找到第一个有效的用户实例（按创建时间降序）
+        if (computeNestInstanceId == null || computeNestInstanceId.trim().isEmpty()) {
+            logger.error("缺少参数: instanceid");
+            return "false";
+        }
+        
+        boolean hasValidInstance = false;
         UserInfo activeUser = null;
-        for (UserInfo user : userInfoList) {
-            if (user.isValid()) {
-                activeUser = user;
-                break;
+        
+        // 方案1: 首先尝试通过aliUid查找用户
+        List<UserInfo> userInfoList = storageService.getUsersByAliUid(aliUid);
+        if (userInfoList != null && !userInfoList.isEmpty()) {
+            // 找到第一个有效的用户实例
+            for (UserInfo user : userInfoList) {
+                if (user.isValid()) {
+                    activeUser = user;
+                    hasValidInstance = true;
+                    break;
+                }
+            }
+            
+            if (activeUser != null) {
+                // 更新computeNestInstanceId关联（如果不同）
+                if (!computeNestInstanceId.equals(activeUser.getComputeNestInstanceId())) {
+                    storageService.updateComputeNestInstanceId(activeUser.getOrderBizId(), computeNestInstanceId);
+                    logger.info("通过aliUid找到有效用户，关联计算巢实例ID: {} -> {}", 
+                        computeNestInstanceId, activeUser.getOrderBizId());
+                }
             }
         }
-
-        boolean hasValidInstance = (activeUser != null);
         
-        // 如果找到有效实例，关联计算巢实例ID
-        if (activeUser != null) {
-            // 更新computeNestInstanceId关联
-            storageService.updateComputeNestInstanceId(activeUser.getOrderBizId(), computeNestInstanceId);
-            logger.info("关联计算巢实例ID: {} -> 云市场实例: {}", computeNestInstanceId, activeUser.getOrderBizId());
+        // 方案2: 如果通过aliUid没找到，尝试通过computeNestInstanceId查找
+        if (!hasValidInstance) {
+            activeUser = storageService.getUserByComputeNestInstanceId(computeNestInstanceId);
+            if (activeUser != null && activeUser.isValid()) {
+                hasValidInstance = true;
+                
+                // 如果是虚拟用户，更新aliUid为传入的真实aliUid
+                if (storageService.isVirtualUser(activeUser)) {
+                    storageService.updateUserAliUid(activeUser.getOrderBizId(), aliUid);
+                    logger.info("虚拟用户更新aliUid: {} -> {} (实例ID: {})", 
+                        activeUser.getAliUid(), aliUid, computeNestInstanceId);
+                }
+                
+                logger.info("通过computeNestInstanceId找到有效用户: {}", computeNestInstanceId);
+            }
         }
         
-        logger.info("检查用户实例状态: aliUid=" + aliUid + 
-                        ", 计算巢实例ID=" + computeNestInstanceId + 
-                        ", 是否有有效实例=" + hasValidInstance);    
-                            
+        logger.info("检查用户实例状态: aliUid={}, 计算巢实例ID={}, 是否有有效实例={}", 
+            aliUid, computeNestInstanceId, hasValidInstance);
+        
         // 生成状态标记文件
         createInstanceStatusFile(computeNestInstanceId, hasValidInstance);
 
@@ -726,5 +738,173 @@ public class IsvController {
     private String getParameter(String paramName) {
         String value = request.getParameter(paramName);
         return value != null ? value.trim() : "";
+    }
+
+    /**
+     * 管理接口 - 查看虚拟用户（简化版）
+     */
+    @RequestMapping(value="/admin/virtual-users", method = RequestMethod.GET)
+    @ResponseBody
+    public String listVirtualUsers() {
+        try {
+            // 获取所有虚拟用户
+            List<UserInfo> allUsers = storageService.getAllUsers();
+            JSONObject result = new JSONObject();
+            JSONArray virtualUsers = new JSONArray();
+            int count = 0;
+            
+            for (UserInfo user : allUsers) {
+                // 判断是否为虚拟用户（根据aliUid前缀）
+                if (user.getAliUid() != null && user.getAliUid().startsWith("VIRTUAL_")) {
+                    JSONObject userObj = new JSONObject();
+                    userObj.put("computeNestInstanceId", user.getComputeNestInstanceId());
+                    userObj.put("aliUid", user.getAliUid());
+                    userObj.put("status", user.getStatus());
+                    userObj.put("isValid", user.isValid());
+                    userObj.put("isExpired", user.isExpired());
+                    userObj.put("expiredOn", user.getExpiredOn());
+                    virtualUsers.add(userObj);
+                    count++;
+                }
+            }
+            
+            result.put("success", true);
+            result.put("count", count);
+            result.put("virtualUsers", virtualUsers);
+            return result.toJSONString();
+            
+        } catch (Exception e) {
+            logger.error("获取虚拟用户列表失败", e);
+            JSONObject result = new JSONObject();
+            result.put("success", false);
+            result.put("error", e.getMessage());
+            return result.toJSONString();
+        }
+    }
+
+    /**
+     * 管理接口 - 查看系统状态（简化版）
+     */
+    @RequestMapping(value="/admin/system-status", method = RequestMethod.GET)
+    @ResponseBody
+    public String getSystemStatus() {
+        JSONObject result = new JSONObject();
+        
+        try {
+            // 1. 统计状态文件
+            File statusDir = new File("/etc/nginx/conf.d/instance_status/");
+            JSONObject statusStats = new JSONObject();
+            if (statusDir.exists() && statusDir.isDirectory()) {
+                File[] statusFiles = statusDir.listFiles((d, name) -> name.endsWith(".conf"));
+                int total = statusFiles != null ? statusFiles.length : 0;
+                statusStats.put("total", total);
+                
+                // 显示几个示例
+                JSONArray examples = new JSONArray();
+                if (statusFiles != null && statusFiles.length > 0) {
+                    for (int i = 0; i < Math.min(3, statusFiles.length); i++) {
+                        File file = statusFiles[i];
+                        String instanceId = file.getName().replace(".conf", "");
+                        examples.add(instanceId);
+                    }
+                }
+                statusStats.put("examples", examples);
+            } else {
+                statusStats.put("total", 0);
+                statusStats.put("exists", false);
+            }
+            
+            // 2. 用户统计
+            List<UserInfo> allUsers = storageService.getAllUsers();
+            int virtualCount = 0;
+            for (UserInfo user : allUsers) {
+                if (user.getAliUid() != null && user.getAliUid().startsWith("VIRTUAL_")) {
+                    virtualCount++;
+                }
+            }
+            
+            JSONObject userStats = new JSONObject();
+            userStats.put("total", allUsers.size());
+            userStats.put("virtual", virtualCount);
+            userStats.put("normal", allUsers.size() - virtualCount);
+            
+            // 3. 汇总
+            result.put("success", true);
+            result.put("timestamp", new Date().toString());
+            result.put("statusFiles", statusStats);
+            result.put("users", userStats);
+            result.put("defaultExpiry", "2026-01-31 00:00:00");
+            
+        } catch (Exception e) {
+            logger.error("获取系统状态失败", e);
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
+        
+        return result.toJSONString();
+    }
+
+        /**
+     * 管理接口 - 查看状态文件详情
+     */
+    @RequestMapping(value="/admin/status-files", method = RequestMethod.GET)
+    @ResponseBody
+    public String listStatusFiles() {
+        JSONObject result = new JSONObject();
+        
+        try {
+            File statusDir = new File("/etc/nginx/conf.d/instance_status/");
+            JSONArray filesArray = new JSONArray();
+            
+            if (statusDir.exists() && statusDir.isDirectory()) {
+                File[] statusFiles = statusDir.listFiles((d, name) -> name.endsWith(".conf"));
+                
+                if (statusFiles != null) {
+                    for (File file : statusFiles) {
+                        JSONObject fileObj = new JSONObject();
+                        fileObj.put("name", file.getName());
+                        fileObj.put("size", file.length());
+                        fileObj.put("lastModified", new Date(file.lastModified()).toString());
+                        
+                        try {
+                            // 读取文件内容
+                            List<String> lines = Files.readAllLines(file.toPath());
+                            if (!lines.isEmpty()) {
+                                fileObj.put("content", lines.get(0));
+                                
+                                // 解析状态
+                                String line = lines.get(0).trim();
+                                if (line.contains(" ")) {
+                                    String[] parts = line.split(" ");
+                                    if (parts.length >= 2) {
+                                        String status = parts[1].replace(";", "").trim();
+                                        fileObj.put("status", status);
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            fileObj.put("error", e.getMessage());
+                        }
+                        
+                        filesArray.add(fileObj);
+                    }
+                }
+                
+                result.put("success", true);
+                result.put("count", filesArray.size());
+                result.put("files", filesArray);
+                result.put("directory", statusDir.getAbsolutePath());
+            } else {
+                result.put("success", false);
+                result.put("error", "状态文件目录不存在: " + statusDir.getAbsolutePath());
+            }
+            
+        } catch (Exception e) {
+            logger.error("获取状态文件列表失败", e);
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
+        
+        return result.toJSONString();
     }
 }

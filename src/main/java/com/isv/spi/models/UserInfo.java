@@ -16,6 +16,7 @@ public class UserInfo implements Serializable {
     private Date expiredOn;
     private boolean trial;
     private String status; // ACTIVE, EXPIRED, RELEASED
+    private boolean virtualUser = false; // 标记是否为虚拟用户
     
     // 固定返回的特定密码
     private static final String FIXED_PASSWORD = "tskyide";
@@ -96,4 +97,13 @@ public class UserInfo implements Serializable {
     public void setComputeNestInstanceId(String computeNestInstanceId) {
         this.computeNestInstanceId = computeNestInstanceId;
     }
+    
+    public boolean isVirtualUser() {
+        return virtualUser;
+    }
+
+    public void setVirtualUser(boolean virtualUser) {
+        this.virtualUser = virtualUser;
+    }
+    
 }
