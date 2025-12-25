@@ -7,7 +7,7 @@ SPI Token生成器 - 简洁版
 import hashlib
 
 # 云市场分配的秘钥
-SECRET_KEY = "3f1629ce-ef25-485e-80f1-7b5a9fb68f20"
+SECRET_KEY = ""
 
 # ==============================
 # 在这里修改你的参数
@@ -15,13 +15,15 @@ SECRET_KEY = "3f1629ce-ef25-485e-80f1-7b5a9fb68f20"
 def get_params():
     """在这里定义你的参数"""
     params = {
-        'action': 'renewInstance',
-        # 'aliUid': '1234',
-        # 'orderBizId': '123',
-        # 'productCode': 'testProduct',
-        'orderId': 'order123',
-        'expiredOn': '2025-12-23 22:30:30',  # 注意：包含空格
-        'instanceId':'123',
+        'action': 'createInstance',
+        'aliUid': '1041031108983109',
+        'orderBizId': '122779388',
+        'productCode': 'testProduct',
+        'expiredOn': '2026-01-25 00:00:00',
+        'package_version': 'yuncode6661200001',
+        'orderId': '269326581310319',
+        'skuId': 'yuncode6661200001',
+        'trial': 'true',
     }
     return params
 
